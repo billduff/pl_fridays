@@ -1,0 +1,5 @@
+(executable
+ (name fpcpat_interpreter)
+ (libraries
+  core
+  pl_fridays))
