@@ -7,19 +7,32 @@ module Abt =
     type t = string [@@deriving sexp_of]
   end)
 
-let rec typ_to_string (typ : Abt.Typ.t) =
+let add_parens_if bool string =
+  match bool with
+  | true -> "(" ^ string ^ ")"
+  | false -> string
+;;
+
+let rec typ_to_string' ~context (typ : Abt.Typ.t) =
   match Abt.Typ.out typ with
   | Var var -> Abt.Typ.Var.name var
-  | Arrow (typ1, typ2) -> sprintf "(%s -> %s)" (typ_to_string typ1) (typ_to_string typ2)
+  | Arrow (typ1, typ2) ->
+    sprintf "(%s -> %s)"
+      (typ_to_string' ~context:`Lhs_of_arrow typ1)
+      (typ_to_string' ~context:`None typ2)
+    |> add_parens_if (match context with `None -> false | `Lhs_of_arrow -> true)
   | Prod fields ->
-    List.map fields ~f:(fun (label, typ) -> sprintf "%s : %s" label (typ_to_string typ))
-    |> String.concat ~sep:", "
+    typ_list_to_string fields
     |> sprintf "prod[%s]"
   | Sum clauses ->
-    List.map clauses ~f:(fun (label, typ) -> sprintf "%s : %s" label (typ_to_string typ))
-    |> String.concat ~sep:", "
+    typ_list_to_string clauses
     |> sprintf "sum[%s]"
-  | Rec (var, typ) -> sprintf "rec[%s.%s]" (Abt.Typ.Var.name var) (typ_to_string typ)
+  | Rec (var, typ) -> sprintf "rec[%s.%s]" (Abt.Typ.Var.name var) (typ_to_string' ~context:`None typ)
+
+and typ_list_to_string l =
+  List.map l ~f:(fun (label, typ) ->
+    sprintf "%s : %s" label (typ_to_string' ~context:`None typ))
+  |> String.concat ~sep:", "
 ;;
 
 let record_to_string to_string fields =
@@ -32,49 +45,73 @@ let record_to_string to_string fields =
     |> sprintf "{ %s }"
 ;;
 
-let rec pat_to_string (pat : Abt.Pat.t) =
+let rec pat_to_string' ~context (pat : Abt.Pat.t) =
   match pat with
   | Wild -> "_"
   | Var var -> Abt.Exp.Var.name var
-  | Record fields -> record_to_string pat_to_string fields
-  | Inj (label, pat) -> sprintf "(inj[%s] %s)" label (pat_to_string pat)
-  | Fold pat -> sprintf "(fold %s)" (pat_to_string pat)
-  | Ascribe (pat, typ) -> sprintf "(%s : %s)" (pat_to_string pat) (typ_to_string typ)
+  | Record fields -> record_to_string (pat_to_string' ~context:`None) fields
+  | Inj (label, pat) ->
+    sprintf "inj[%s] %s" label (pat_to_string' ~context:`Arg pat)
+    |> add_parens_if (match context with `None -> false | `Arg -> true)
+  | Fold pat ->
+    sprintf "fold %s" (pat_to_string' ~context:`Arg pat)
+    |> add_parens_if (match context with `None -> false | `Arg -> true)
+  | Ascribe (pat, typ) ->
+    sprintf "(%s : %s)" (pat_to_string' ~context:`None pat) (typ_to_string' ~context:`None typ)
 ;;
 
 (* CR-soon wduff: Consider removing superfluous parens. *)
-let rec exp_to_string (exp : Abt.Exp.t) =
+let rec exp_to_string' ~context (exp : Abt.Exp.t) =
   match Abt.Exp.out exp with
   | Var var -> Abt.Exp.Var.name var
   | Fun (arg_pat, body) ->
-    sprintf "(fun (%s) => %s)" (pat_to_string arg_pat) (exp_to_string body)
+    sprintf "(fun %s => %s)"
+      (pat_to_string' ~context:`None arg_pat)
+      (exp_to_string' ~context:`None body)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Ap (func, arg) ->
-    sprintf "(%s %s)" (exp_to_string func) (exp_to_string arg)
+    sprintf "(%s %s)" (exp_to_string' ~context:`Fun func) (exp_to_string' ~context:`Arg arg)
+    |> add_parens_if (match context with `None | `Fun -> false | `Arg -> true )
   | Record fields ->
-    record_to_string exp_to_string fields
-  | Inj (label, exp) -> sprintf "(inj[%s] %s)" label (exp_to_string exp)
-  | Fold exp -> sprintf "(fold %s)" (exp_to_string exp)
+    record_to_string (exp_to_string' ~context:`None) fields
+  | Inj (label, exp) ->
+    sprintf "inj[%s] %s" label (exp_to_string' ~context:`Arg exp)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
+  | Fold exp ->
+    sprintf "fold %s" (exp_to_string' ~context:`Arg exp)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Match (exp, cases) ->
     (match cases with
-     | [] -> sprintf "match %s with end" (exp_to_string exp)
+     | [] -> sprintf "match %s with end" (exp_to_string' ~context:`None exp)
      | _::_ ->
        List.map cases ~f:(fun (pat, exp) ->
-         sprintf "%s => %s" (pat_to_string pat) (exp_to_string exp))
+         sprintf "%s => %s" (pat_to_string' ~context:`None pat) (exp_to_string' ~context:`None exp))
        |> String.concat ~sep:" | "
-       |> sprintf "match %s with %s end" (exp_to_string exp))
+       |> sprintf "match %s with %s end" (exp_to_string' ~context:`None exp))
   | Fix (var, body) ->
-    sprintf "(fix %s is %s)" (Abt.Exp.Var.name var) (exp_to_string body)
+    sprintf "fix %s is %s" (Abt.Exp.Var.name var) (exp_to_string' ~context:`None body)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Let ((pat, exp1), exp2) ->
-    sprintf "(let %s = %s in %s)" (pat_to_string pat) (exp_to_string exp1) (exp_to_string exp2)
+    sprintf
+      "let %s = %s in %s"
+      (pat_to_string' ~context:`None pat)
+      (exp_to_string' ~context:`None exp1)
+      (exp_to_string' ~context:`None exp2)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Let_type ((typ_var, typ), exp) ->
     sprintf
-      "(let type %s = %s in %s)"
+      "let type %s = %s in %s"
       (Abt.Typ.Var.name typ_var)
-      (typ_to_string typ)
-      (exp_to_string exp)
+      (typ_to_string' ~context:`None typ)
+      (exp_to_string' ~context:`None exp)
+    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Ascribe (exp, typ) ->
-    sprintf "(%s : %s)" (exp_to_string exp) (typ_to_string typ)
+    sprintf "(%s : %s)" (exp_to_string' ~context:`None exp) (typ_to_string' ~context:`None typ)
 ;;
+
+let typ_to_string = typ_to_string' ~context:`None
+let pat_to_string = pat_to_string' ~context:`None
+let exp_to_string = exp_to_string' ~context:`None
 
 module Abt_of_ast : sig
   val convert : Ast.Exp.t -> Abt.Exp.t
@@ -453,8 +490,8 @@ end = struct
      I haven't done (1) because it's really grotty to implement, espcially if you try to implement
      it efficiently.
 
-     I haven't done (2) because relying on I'm dubious whether relying on type inhabitedness is a
-     good idea, since it is often undecidable (e.g. for system F). *)
+     I haven't done (2) because  I'm dubious whether relying on type inhabitedness is a good idea,
+     since it is often undecidable (e.g. for system F). *)
   let rec subtype typ typ' =
     match (Abt.Typ.out typ, Abt.Typ.out typ') with
     | (Var var, Var var') ->
@@ -562,7 +599,6 @@ end = struct
        | _ -> failwith "type error")
     | Ascribe _ ->
       let (context, typ', constr) = synth_pat pat in
-      (* CR wduff: with subtyping, it seems like in general the constr might change with the typ. *)
       subtype typ typ';
       (context, constr)
   ;;
@@ -860,8 +896,6 @@ end = struct
            and therefore can't occur in the outer expression context. We also don't need to apply it
            to [typ] before returning for essentially the same reason. *)
         let subst = unify typ' typ in
-        (* CR wduff: Does the unification changing the type mean the constr needs to change?
-           (this would also apply to the Inj and Fold cases above) *)
         (apply_subst_mono_context subst context, typ, constr)
   ;;
 
