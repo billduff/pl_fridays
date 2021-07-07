@@ -2,10 +2,10 @@
   open! Core
 %}
 
-%type <Fpcpat_parse_tree.Exp.t> program
-%type <Fpcpat_parse_tree.Typ.t> typ
-%type <Fpcpat_parse_tree.Pat.t> pat
-%type <Fpcpat_parse_tree.Exp.t> exp
+%type <Parse_tree.Exp.t> program
+%type <Parse_tree.Typ.t> typ
+%type <Parse_tree.Pat.t> pat
+%type <Parse_tree.Exp.t> exp
 
 %start program
 %token LPAREN RPAREN LBRACKET RBRACKET LBRACE RBRACE EQUAL BAR DOT COMMA COLON UNDERSCORE ARROW EQARROW PROD SUM REC FUN INJ FOLD MATCH WITH END FIX IS TYPE LET IN EOF

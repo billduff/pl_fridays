@@ -40,6 +40,6 @@ module Types = struct
   end
 end
 
-module type Fpcpat_parse_tree = sig
+module type Parse_tree = sig
   include module type of struct include Types end
 end

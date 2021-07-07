@@ -2,4 +2,4 @@
  (name fpcpat_interpreter)
  (libraries
   core
-  pl_fridays))
+  pl_fridays_fpcpat))

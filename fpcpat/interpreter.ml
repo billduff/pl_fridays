@@ -1,6 +1,6 @@
 open! Core
 
-module Ast = Fpcpat_parse_tree
+module Ast = Parse_tree
 
 module Abt =
   Abbot_other_examples.Fpcpat.Make (struct
@@ -1022,7 +1022,7 @@ let run ~filename ~type_checker () =
     In_channel.with_file filename ~f:(fun in_channel ->
       let lexbuf = Lexing.from_channel in_channel in
       lexbuf.lex_curr_p <- { lexbuf.lex_curr_p with pos_fname = filename };
-      Fpcpat_parser.program Fpcpat_lexer.token lexbuf)
+      Parser.program Lexer.token lexbuf)
   in
   let abt = Abt_of_ast.convert ast in
   printf "%s\n%!" (exp_to_string abt);

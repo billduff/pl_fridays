@@ -1,6 +1,6 @@
 {
 open! Core
-open Fpcpat_parser
+open Parser
 }
 
 let whitespace = [' ' '\t']

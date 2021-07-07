@@ -1,5 +1,5 @@
 (library
- (name pl_fridays)
+ (name pl_fridays_fpcpat)
  (inline_tests)
  (preprocess (pps ppx_jane))
  (libraries
@@ -7,7 +7,7 @@
   abbot
   abbot.other_examples))
 
-(ocamllex fpcpat_lexer)
+(ocamllex lexer)
 (menhir
  (flags -v --comment --strict) ; --trace
- (modules fpcpat_parser))
+ (modules parser))
