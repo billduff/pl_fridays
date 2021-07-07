@@ -1,0 +1,10 @@
+let type nat = rec[t.sum[l : prod[], r : t]] in
+let zero = (fold (inj[l] {} : sum[l : prod[], r : nat]) : nat) in
+let succ = fun n => (fold (inj[r] n : sum[l : prod[], r : nat]) : nat) in
+let plus = fix self is fun (fold x : nat) => fun y =>
+  match x with
+  | (inj[l] {} : sum[l : prod[], r : nat]) => y
+  | (inj[r] x : sum[l : prod[], r : nat]) => succ (self x y) end
+in
+let two = succ (succ zero) in
+plus two two

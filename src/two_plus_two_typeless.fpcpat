@@ -1,0 +1,9 @@
+let zero = fold (inj[l] {}) in
+let succ = fun n => fold (inj[r] n) in
+let plus = fix self is fun (fold x) => fun y =>
+  match x with
+  | inj[l] {} => y
+  | inj[r] x => succ (self x y) end
+in
+let two = succ (succ zero) in
+plus two two

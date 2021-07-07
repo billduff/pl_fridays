@@ -42,7 +42,7 @@ let rec pat_to_string (pat : Abt.Pat.t) =
   | Ascribe (pat, typ) -> sprintf "(%s : %s)" (pat_to_string pat) (typ_to_string typ)
 ;;
 
-(* CR wduff: Consider removing superfluous parens. *)
+(* CR-soon wduff: Consider removing superfluous parens. *)
 let rec exp_to_string (exp : Abt.Exp.t) =
   match Abt.Exp.out exp with
   | Var var -> Abt.Exp.Var.name var
@@ -87,18 +87,19 @@ end = struct
          raise_s [%message "unbound variable" (var_name : string)])
     | Arrow (typ1, typ2) ->
       Abt.Typ.arrow (convert_typ context typ1, convert_typ context typ2)
-    | Prod fields ->
-      Abt.Typ.prod
-        (List.map fields ~f:(fun (label, typ) ->
-           (label, convert_typ context typ)))
-    | Sum clauses ->
-      Abt.Typ.sum
-        (List.map clauses ~f:(fun (label, typ) ->
-           (label, convert_typ context typ)))
+    | Prod fields -> Abt.Typ.prod (convert_typ_list context fields)
+    | Sum clauses -> Abt.Typ.sum (convert_typ_list context clauses)
     | Rec (var_name, typ) ->
       let var = Abt.Typ.Var.create var_name in
       let context = String.Map.set context ~key:var_name ~data:var in
       Abt.Typ.rec_ (var, convert_typ context typ)
+
+  and convert_typ_list context l =
+    match List.contains_dup ~compare:[%compare: string * _] l with
+    | true -> failwith "duplicate label"
+    | false ->
+      List.map l ~f:(fun (label, typ) ->
+        (label, convert_typ context typ))
   ;;
 
   let rec convert_pat typ_context
@@ -109,17 +110,20 @@ end = struct
       let context = String.Map.singleton var_name var in
       (context, Var var)
     | Record fields ->
-      let (context, fields) =
-        List.fold_map fields ~init:String.Map.empty ~f:(fun acc_context (label, pat) ->
-          let (this_context, pat) = convert_pat typ_context pat in
-          let context =
-            Map.merge_skewed acc_context this_context ~combine:(fun ~key:var_name _var1 _var2 ->
-              (* CR wduff: Location info would be nice. *)
-              raise_s [%message "Duplicate variable name in pattern." (var_name : string)])
-          in
-          (context, (label, pat)))
-      in
-      (context, Record fields)
+      (match List.contains_dup ~compare:[%compare: string * _] fields with
+       | true -> failwith "duplicate field name"
+       | false ->
+         let (context, fields) =
+           List.fold_map fields ~init:String.Map.empty ~f:(fun acc_context (label, pat) ->
+             let (this_context, pat) = convert_pat typ_context pat in
+             let context =
+               Map.merge_skewed acc_context this_context ~combine:(fun ~key:var_name _var1 _var2 ->
+                 (* CR-soon wduff: Location info would be nice. *)
+                 raise_s [%message "Duplicate variable name in pattern." (var_name : string)])
+             in
+             (context, (label, pat)))
+         in
+         (context, Record fields))
     | Inj (label, pat) ->
       let (context, pat) = convert_pat typ_context pat in
       (context, Inj (label, pat))
@@ -151,9 +155,12 @@ end = struct
     | Ap (exp1, exp2) ->
       Abt.Exp.ap (convert_exp typ_context context exp1, convert_exp typ_context context exp2)
     | Record fields ->
-      Abt.Exp.record
-        (List.map fields ~f:(fun (label, exp) ->
-           (label, convert_exp typ_context context exp)))
+      (match List.contains_dup ~compare:[%compare: string * _] fields with
+       | true -> failwith "duplicate field name"
+       | false ->
+         Abt.Exp.record
+           (List.map fields ~f:(fun (label, exp) ->
+              (label, convert_exp typ_context context exp))))
     | Inj (label, exp) -> Abt.Exp.inj (label, convert_exp typ_context context exp)
     | Fold exp -> Abt.Exp.fold (convert_exp typ_context context exp)
     | Match (exp, cases) ->
@@ -208,7 +215,7 @@ module Dynamics = struct
   ;;
 
   let apply_subst subst exp =
-    (* CR wduff: It's kinda sad that abbot doesn't give us a way to build up a big subst
+    (* CR-soon wduff: It's kinda sad that abbot doesn't give us a way to build up a big subst
        directly, because it would probably be less code and more efficient than building up
        this list only to iterate over it asking abbot to build up a substitution inside the
        expression. *)
@@ -268,18 +275,186 @@ let rec eval_type_aliases exp =
   | Ascribe (exp, typ) -> Abt.Exp.ascribe (eval_type_aliases exp, typ)
 ;;
 
-(* CR wduff: Think about error messages. *)
+module Pat_constraint : sig
+  module Simple : sig
+    type t =
+      | True
+      | Record of (string * t) list
+      | Inj of string * t
+      | Fold of t
+  end
+
+  type t
+
+  val singleton : Simple.t -> t
+  val or_list_check_irredundant : Simple.t list -> wrt:Abt.Typ.t -> t option
+
+  val is_exhaustive : t -> wrt:Abt.Typ.t -> bool
+end = struct
+  module Simple = struct
+    type t =
+      | True
+      | Record of (string * t) list
+      | Inj of string * t
+      | Fold of t
+  end
+
+  type t =
+    | True
+    | False
+    | Or_records of t String.Map.t list
+    | Or_injs of t String.Map.t
+    | Fold of t
+
+  let rec cartesian_product = function
+    | [] -> [[]]
+    | l :: ls ->
+      let rest = cartesian_product ls in
+      List.concat_map l ~f:(fun x ->
+        List.map rest ~f:(fun l' -> x :: l'))
+  ;;
+
+  let rec make (ts : Simple.t list) =
+    match ts with
+    | [] -> False
+    | True :: _ -> True
+    | Record _ :: _ ->
+      List.filter_map ts ~f:(function
+        | True -> None
+        | Record fields -> Some fields
+        | _ -> assert false)
+      |> cartesian_product
+      |> List.map ~f:(fun fields ->
+        String.Map.of_alist_multi fields
+        |> Map.map ~f:make)
+      |> Or_records
+    | Inj _ :: _ ->
+      List.filter_map ts ~f:(function
+        | True -> None
+        | Inj (label, t) -> Some (label, t)
+        | _ -> assert false)
+      |> String.Map.of_alist_multi
+      |> Map.map ~f:make
+      |> Or_injs
+    | Fold _ :: _ ->
+      List.filter_map ts ~f:(function
+        | True -> None
+        | Fold t -> Some t
+        | _ -> assert false)
+      |> make
+      |> Fold
+  ;;
+
+  let rec singleton (t : Simple.t) =
+    match t with
+    | True -> True
+    | Record fields ->
+      let map =
+        String.Map.of_alist_exn fields
+        |> Map.map ~f:singleton
+      in
+      Or_records [ map ]
+    | Inj (label, t) -> Or_injs (String.Map.singleton label (singleton t))
+    | Fold t -> Fold (singleton t)
+  ;;
+
+  (* Note: Similar to our choice with subtyping above, we don't check for empty types (for which
+     [False] is arguably exhaustive). *)
+  let rec is_exhaustive t ~wrt:typ =
+    match t with
+    | True -> true
+    | False -> false
+    | Or_records records ->
+      (match Abt.Typ.out typ with
+       | Prod fields ->
+         let fields = String.Map.of_alist_exn fields in
+         List.for_all records ~f:(fun ts_by_fields ->
+           List.exists (Map.to_alist ts_by_fields) ~f:(fun (label, t) ->
+             is_exhaustive t ~wrt:(Map.find_exn fields label)))
+       | _ -> failwith "type error")
+    | Or_injs ts_by_label ->
+      (match Abt.Typ.out typ with
+       | Sum clauses ->
+         List.for_all clauses ~f:(fun (label, typ) ->
+           match Map.find ts_by_label label with
+           | None -> false
+           | Some t -> is_exhaustive t ~wrt:typ)
+       | _ -> failwith "type error")
+    | Fold t ->
+      (match Abt.Typ.out typ with
+       | Rec (typ_var, typ') ->
+         is_exhaustive t ~wrt:(Abt.Typ.subst Typ typ typ_var typ')
+       | _ -> failwith "type error")
+  ;;
+
+  let rec check_not_redundant_then_or ~wrt ts (t : Simple.t) =
+    match (ts, t) with
+    | True, _ -> None
+    | False, _ -> Some (make [ t ])
+    | _, True -> Option.some_if (is_exhaustive ~wrt ts) True
+    | Or_records records, Record fields ->
+      let records =
+        List.filter_map records ~f:(fun ts_by_field ->
+          Map.merge
+            ts_by_field
+            (String.Map.of_alist_exn fields)
+            ~f:(fun ~key:_ -> function
+              | `Both (ts, t) -> Some (check_not_redundant_then_or ~wrt ts t)
+              | `Left ts -> Some (Option.some_if (is_exhaustive ~wrt ts) True)
+              | `Right _ -> Some None)
+          |> Map.to_alist
+          |> List.map ~f:(fun (label, opt) ->
+            Option.map opt ~f:(fun ts -> (label, ts)))
+          |> Option.all
+          |> Option.map ~f:String.Map.of_alist_exn)
+      in
+      (match records with
+       | [] -> None
+       | _::_ -> Some (Or_records records))
+    | Or_injs ts_by_label, Inj (label, t) ->
+      (match String.Map.find ts_by_label label with
+       | None -> Some (Or_injs (String.Map.add_exn ts_by_label ~key:label ~data:(make [ t ])))
+       | Some ts ->
+         (match check_not_redundant_then_or ~wrt ts t with
+          | None -> None
+          | Some ts ->
+            Some (Or_injs (Map.set ts_by_label ~key:label ~data:ts))))
+    | Fold ts, Fold t -> check_not_redundant_then_or ~wrt ts t
+    | _ -> assert false
+  ;;
+
+  let or_list_check_irredundant ts ~wrt =
+    List.fold_until
+      ts
+      ~init:False
+      ~f:(fun acc pat_constr ->
+        match check_not_redundant_then_or ~wrt acc pat_constr with
+        | None -> Stop None
+        | Some pat_constr -> Continue pat_constr)
+      ~finish:Option.some
+  ;;
+end
+
+(* CR-soon wduff: Think about error messages. *)
 module Bidirectional_type_checker : sig
   val run_exn : Abt.Exp.t -> Abt.Typ.t
 end = struct
-  (* CR wduff: We do need to make sure to check for duplicate labels in that pass. *)
   (* This is good to have for completeness, but it doesn't actually have to do anything because we
      already check that types are well-formed in the ast->abt pass. Also this really is "check" not
      "synth", because we need these types ot have kind "type", since they come from annotations. *)
   let check_typ (_ : Abt.Typ.t) = ()
 
-  (* CR wduff: We could also check for empty types, which can be considered subtypes of any other
-     type, and functions out of bottom, which can be considered supertypes of any other type. *)
+  (* CR-soon wduff: This subtyping relation is incomplete in a couple ways:
+     1) The way we deal with recursive types is not fully general.
+     2) We could consider whether types are inhabited (by values), and take advantage of the
+     fact that empty types can be considered subtypes of any other type and functions out of the
+     empty type can be considered supertypes of any other type.
+
+     I haven't done (1) because it's really grotty to implement, espcially if you try to implement
+     it efficiently.
+
+     I haven't done (2) because relying on I'm dubious whether relying on type inhabitedness is a
+     good idea, since it is often undecidable (e.g. for system F). *)
   let rec subtype typ typ' =
     match (Abt.Typ.out typ, Abt.Typ.out typ') with
     | (Var var, Var var') ->
@@ -302,86 +477,116 @@ end = struct
         | Some typ' -> subtype typ typ'
         | None -> failwith "type error")
     | (Rec (var, typ), Rec (var', typ')) ->
-      (* CR wduff: This is not the most complete way to do this. *)
       subtype typ (Abt.Typ.subst Typ (Abt.Typ.var var) var' typ')
     | _ -> failwith "type error"
   ;;
 
-  let rec synth_pat (pat : Abt.Pat.t) =
+  let rec synth_pat (pat : Abt.Pat.t)
+    : Abt.Typ.t Abt.Exp.Var.Map.t * Abt.Typ.t * Pat_constraint.Simple.t =
     match pat with
     | Record fields ->
-      let (context, field_typs) =
+      let (context, field_typs_and_constrs) =
         List.fold_map fields ~init:Abt.Exp.Var.Map.empty ~f:(fun acc_context (label, pat) ->
-          let (this_context, typ) = synth_pat pat in
+          let (this_context, typ, constr) = synth_pat pat in
           let context =
             Map.merge_skewed acc_context this_context ~combine:(fun ~key:_ _ _ -> assert false)
           in
-          (context, (label, typ)))
+          (context, ((label, typ), (label, constr))))
       in
-      (context, Abt.Typ.prod field_typs)
+      let (field_typs, field_constrs) = List.unzip field_typs_and_constrs in
+      (context, Abt.Typ.prod field_typs, Record field_constrs)
+    | Inj (label, pat) ->
+      let (context, typ, constr) = synth_pat pat in
+      (context, Abt.Typ.sum [ (label, typ) ], Inj (label, constr))
     | Ascribe (pat, typ) ->
       check_typ typ;
-      let context = check_pat pat typ in
-      (context, typ)
-    | _ -> failwithf "could not infer type of %s" (pat_to_string pat) ()
+      let (context, constr) = check_pat pat typ in
+      (context, typ, constr)
+    | Wild | Var _ | Fold _ -> failwithf "could not infer type of %s" (pat_to_string pat) ()
 
   and check_pat (pat : Abt.Pat.t) typ =
     match pat with
-    | Wild -> Abt.Exp.Var.Map.empty
-    | Var var -> Abt.Exp.Var.Map.singleton var typ
+    | Wild -> (Abt.Exp.Var.Map.empty, True)
+    | Var var -> (Abt.Exp.Var.Map.singleton var typ, True)
     | Record fields ->
       (match Abt.Typ.out typ with
        | Prod field_typs ->
-         (* CR wduff: Probably we should give an error message for duplicate field names, rather
-            than raising? *)
          let field_typs = String.Table.of_alist_exn field_typs in
-         (* CR wduff: Complain about missing fields? They are safe, but indicate dead code. *)
-         (* CR wduff: Check for duplicate field names in the pattern, if we're not doing that in the
-            ast->abt pass. *)
-         List.fold fields ~init:Abt.Exp.Var.Map.empty ~f:(fun acc_context (label, pat) ->
-           match Hashtbl.find field_typs label with
-           | Some typ ->
-             let this_context = check_pat pat typ in
-             Map.merge_skewed acc_context this_context ~combine:(fun ~key:_ _ _ -> assert false)
-           | None -> failwith "type error")
+         let (context, field_constrs) =
+           (* Note: We deliberately allow fields that show up in the type to be missing from the
+              pattern. This is important for subsumption. E.g., if we have a variable bound with
+              some record type, and we're matching on that variable, we need the program to continue
+              to type check if an expression with a smaller principle type is substituted for the
+              variable. *)
+           List.fold_map fields ~init:Abt.Exp.Var.Map.empty ~f:(fun acc_context (label, pat) ->
+             match Hashtbl.find field_typs label with
+             | Some typ ->
+               let (this_context, constr) = check_pat pat typ in
+               let context =
+                 Map.merge_skewed acc_context this_context ~combine:(fun ~key:_ _ _ -> assert false)
+               in
+               (context, (label, constr))
+             | None -> failwith "type error")
+         in
+         (context, Record field_constrs)
        | _ -> failwith "type error")
     | Inj (label, pat) ->
       (match Abt.Typ.out typ with
-       | Sum clause_typs -> (match
-         List.find_map clause_typs ~f:(fun (label', typ) ->
-           match String.equal label label' with
-           | true -> Some typ
-           | false -> None)
-       with
-       | Some typ -> check_pat pat typ
-       | None ->
-         (* CR wduff: Isn't this case actually just fine? *)
-         failwith "type error")
-         | _ -> failwith "type error")
+       | Sum clause_typs ->
+         (match
+            List.find_map clause_typs ~f:(fun (label', typ) ->
+              match String.equal label label' with
+              | true -> Some typ
+              | false -> None)
+          with
+          | Some typ ->
+            let (context, constr) = check_pat pat typ in
+            (context, Inj (label, constr))
+          | None ->
+            (* For the same reasoning as missing record fields above, we need to be okay with
+               injections that don't appear in the type. We still need to synthesize a type for the
+               subpattern, in order to compute the constraint. This might appear to break
+               substitution, because again, we now have less type information than before, and may
+               therefore not be able to type check. However, that only breaks substitution for
+               algorithmic type checking. We can still appeal to the declarative typing rules
+               instead (or build a fancier evaluator that carefully carries along the required type
+               annotations). *)
+            let (context, _, constr) = synth_pat pat in
+            (context, Inj (label, constr)))
+       | _ -> failwith "type error")
     | Fold pat ->
       (match Abt.Typ.out typ with
-       | Rec (typ_var, typ') -> check_pat pat (Abt.Typ.subst Typ typ typ_var typ')
+       | Rec (typ_var, typ') ->
+         let (context, constr) = check_pat pat (Abt.Typ.subst Typ typ typ_var typ') in
+         (context, Fold constr)
        | _ -> failwith "type error")
-    | _ ->
-      let (context, typ') = synth_pat pat in
+    | Ascribe _ ->
+      let (context, typ', constr) = synth_pat pat in
+      (* CR wduff: with subtyping, it seems like in general the constr might change with the typ. *)
       subtype typ typ';
-      context
+      (context, constr)
   ;;
 
   let synth_pat_and_extend_context context pat =
-    let (pat_context, typ) = synth_pat pat in
+    let (pat_context, typ, constr) = synth_pat pat in
     let context =
       Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
     in
-    (context, typ)
+    (context, typ, constr)
   ;;
 
   let check_pat_and_extend_context context pat typ =
-    let pat_context = check_pat pat typ in
+    let (pat_context, constr) = check_pat pat typ in
     let context =
       Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
     in
-    context
+    (context, constr)
+  ;;
+
+  let check_pat_exhaustive pat_constr ~wrt =
+    match Pat_constraint.is_exhaustive pat_constr ~wrt with
+    | true -> ()
+    | false -> failwith "type error"
   ;;
 
   let rec synth_exp context exp =
@@ -390,7 +595,8 @@ end = struct
       (try Map.find_exn context var
        with exn -> raise_s [%message "hrm" (exn : exn) (context : Abt.Typ.t Abt.Exp.Var.Map.t)])
     | Fun (arg_pat, body) ->
-      let (context, arg_typ) = synth_pat_and_extend_context context arg_pat in
+      let (context, arg_typ, pat_constr) = synth_pat_and_extend_context context arg_pat in
+      check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:arg_typ;
       Abt.Typ.arrow (arg_typ, synth_exp context body)
     | Ap (func, arg) ->
       (match Abt.Typ.out (synth_exp context func) with
@@ -406,39 +612,39 @@ end = struct
       let typ = synth_exp context exp in
       Abt.Typ.sum [ (label, typ) ]
     | Let ((pat, exp1), exp2) ->
-      (* CR wduff: This non-determinism is sad, but hopefully most patterns are small, so this won't
-         be too expensive. *)
+      (* This non-determinism is sad, but hopefully most patterns are small, so this won't be too
+         expensive. *)
       (match synth_pat_and_extend_context context pat with
-       | (context', typ) ->
+       | (context', typ, pat_constr) ->
+         check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:typ;
          check_exp context exp1 typ;
          synth_exp context' exp2
        | exception _ ->
          let typ1 = synth_exp context exp1 in
-         let context = check_pat_and_extend_context context pat typ1 in
+         let (context, pat_constr) = check_pat_and_extend_context context pat typ1 in
+         check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:typ1;
          synth_exp context exp2)
     | Ascribe (exp, typ) ->
       check_typ typ;
       check_exp context exp typ;
       typ
-    | _ -> failwithf "could not infer type of %s" (exp_to_string exp) ()
+    | Fold _ | Match _ | Fix _ -> failwithf "could not infer type of %s" (exp_to_string exp) ()
+    | Let_type _ -> assert false
 
   and check_exp context exp typ =
-    (* CR wduff: We could allow "wildcard" types, and deal with them by switching from checking back
-       to synthesizing when checking against a wildcard. This would allow users to, e.g., only
+    (* CR-soon wduff: We could allow "wildcard" types, and deal with them by switching from checking
+       back to synthesizing when checking against a wildcard. This would allow users to, e.g., only
        specify the argument type of a function, though they can do that with patter ascriptions as
        well. *)
     match Abt.Exp.out exp with
     | Fun (arg_pat, body) ->
-      (* CR wduff: There should be a synth version of this that attempts to synthesize the type of
-         the pattern. *)
       (match Abt.Typ.out typ with
        | Arrow (typ1, typ2) ->
-         let context = check_pat_and_extend_context context arg_pat typ1 in
+         let (context, pat_constr) = check_pat_and_extend_context context arg_pat typ1 in
+         check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:typ1;
          check_exp context body typ2
        | _ -> failwith "type error")
     | Record fields ->
-      (* CR wduff: Check for duplicate field names, if we're not doing that above. (and also in the
-         synth code). *)
       (match Abt.Typ.out typ with
        | Prod field_typs ->
          let fields = String.Map.of_alist_exn fields in
@@ -470,30 +676,38 @@ end = struct
           | None -> failwith "type error")
        | _ -> failwith "type error")
     | Fold exp ->
-      (* CR wduff: Can there be a synth version of this? *)
       (match Abt.Typ.out typ with
        | Rec (typ_var, typ') ->
          check_exp context exp (Abt.Typ.subst Typ typ typ_var typ')
        | _ -> failwith "type error")
     | Match (exp, cases) ->
       let typ' = synth_exp context exp in
-      List.iter cases ~f:(fun (pat, exp) ->
-        let context = check_pat_and_extend_context context pat typ' in
-        check_exp context exp typ)
+      let pat_constrs =
+        List.map cases ~f:(fun (pat, exp) ->
+          let (context, pat_constr) = check_pat_and_extend_context context pat typ' in
+          check_exp context exp typ;
+          pat_constr)
+      in
+      (match Pat_constraint.or_list_check_irredundant pat_constrs ~wrt:typ' with
+       | None -> failwith "redundant pattern"
+       | Some pat_constr -> check_pat_exhaustive pat_constr ~wrt:typ')
     | Fix (var, body) ->
       check_exp (Map.set context ~key:var ~data:typ) body typ
     | Let ((pat, exp1), exp2) ->
       (match synth_pat_and_extend_context context pat with
-       | (context', typ') ->
+       | (context', typ', pat_constr) ->
+         check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:typ';
          check_exp context exp1 typ';
          check_exp context' exp2 typ
        | exception _ ->
          let typ1 = synth_exp context exp1 in
-         let context = check_pat_and_extend_context context pat typ1 in
+         let (context, pat_constr) = check_pat_and_extend_context context pat typ1 in
+         check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:typ1;
          check_exp context exp2 typ)
-    | _ ->
+    | Var _ | Ap _ | Ascribe _ ->
       let typ' = synth_exp context exp in
       subtype typ' typ
+    | Let_type _ -> assert false
   ;;
 
   let run_exn exp =
@@ -505,161 +719,272 @@ end
 module Hindley_milner_type_checker : sig
   val run_exn : Abt.Exp.t -> Abt.Typ.t
 end = struct
+  let check_typ (_ : Abt.Typ.t) = ()
+
   let apply_subst subst typ =
     List.fold subst ~init:typ ~f:(fun acc (typ, var) -> Abt.Typ.subst Typ typ var acc)
   ;;
 
+  let apply_subst_mono_context subst context =
+    Map.map context ~f:(apply_subst subst)
+  ;;
+
   let apply_subst_context subst context =
-    Abt.Exp.Var.Map.map context ~f:(fun poly_typ ->
+    Map.map context ~f:(fun poly_typ ->
       let (Poly (vars, typ)) = Abt.Poly_typ.out poly_typ in
       Abt.Poly_typ.poly (vars, apply_subst subst typ))
   ;;
 
-  let rec unify typ1 typ2 =
-    match (Abt.Typ.out typ1, Abt.Typ.out typ2) with
-    (* CR wduff: We need an occurs check in these two cases. *)
-    | Var var, _ -> [ (typ2, var) ]
-    | _, Var var -> [ (typ1, var) ]
-    | Arrow (typ1, typ1'), Arrow (typ2, typ2') ->
-      let subst = unify typ1 typ2 in
-      let subst' = unify (apply_subst subst typ1') (apply_subst subst typ2') in
-      subst @ subst'
-    | Prod fields1, Prod fields2 ->
-      unify_lists fields1 fields2
-    | Sum clauses1, Sum clauses2 ->
-      unify_lists clauses1 clauses2
-    | Rec (var1, typ1), Rec (var2, typ2) ->
-      (* CR wduff: Figure out what to do here. *)
-      failwith "unimpl"
-    | _ -> failwith "type error"
-
-  and unify_lists l1 l2 =
-    (* CR wduff: Better errors. *)
-    List.fold2_exn
-      (List.sort l1 ~compare:[%compare: string * _])
-      (List.sort l2 ~compare:[%compare: string * _])
-      ~init:[]
-      ~f:(fun acc_subst (label1, typ1) (label2, typ2) ->
-        assert (String.equal label1 label2);
-        (* CR wduff: Do we have to compose the substs? *)
-        let this_subst = unify (apply_subst acc_subst typ1) (apply_subst acc_subst typ2) in
-        (* CR wduff: Order could matter, and I think this is the wrong order. *)
-        this_subst @ acc_subst)
+  let rec free_vars ~bound_vars typ =
+    match Abt.Typ.out typ with
+    | Var var ->
+      (match Set.mem bound_vars var with
+       | true -> Abt.Typ.Var.Set.singleton var
+       | false -> Abt.Typ.Var.Set.empty)
+    | Arrow (typ1, typ2) -> Set.union (free_vars ~bound_vars typ1) (free_vars ~bound_vars typ2)
+    | Prod l | Sum l ->
+      List.map l ~f:(fun (_label, typ) -> free_vars ~bound_vars typ)
+      |> Abt.Typ.Var.Set.union_list
+    | Rec (var, typ) ->
+      free_vars ~bound_vars:(Set.add bound_vars var) typ
   ;;
 
-  let rec infer_pat (pat : Abt.Pat.t) =
+  let occurs ~in_ var =
+    Set.mem (free_vars ~bound_vars:Abt.Typ.Var.Set.empty in_) var
+  ;;
+
+  let rec unify' bound_vars typ1 typ2 =
+    match (Abt.Typ.out typ1, Abt.Typ.out typ2) with
+    | Var var, _ when not (Set.mem bound_vars var)->
+      (match occurs ~in_:typ2 var with
+       | true -> failwith "type error"
+       | false -> [ (typ2, var) ])
+    | _, Var var when not (Set.mem bound_vars var) ->
+      (match occurs ~in_:typ1 var with
+       | true -> failwith "type error"
+       | false -> [ (typ1, var) ])
+    | Var var1, Var var2 ->
+      (* We know from the above these are both bound, so we can't substitute for them. *)
+      (match Abt.Typ.Var.equal var1 var2 with
+       | true -> []
+       | false -> failwith "type error")
+    | Arrow (typ1, typ1'), Arrow (typ2, typ2') ->
+      let subst = unify' bound_vars typ1 typ2 in
+      let subst' = unify' bound_vars (apply_subst subst typ1') (apply_subst subst typ2') in
+      subst @ subst'
+    | (Prod l1, Prod l2) | (Sum l1, Sum l2) ->
+      (* CR-soon wduff: Better errors. *)
+      List.fold2_exn
+        (List.sort l1 ~compare:[%compare: string * _])
+        (List.sort l2 ~compare:[%compare: string * _])
+        ~init:[]
+        ~f:(fun acc_subst (label1, typ1) (label2, typ2) ->
+          assert (String.equal label1 label2);
+          let this_subst =
+            unify' bound_vars (apply_subst acc_subst typ1) (apply_subst acc_subst typ2)
+          in
+          acc_subst @ this_subst)
+    | Rec (var1, typ1), Rec (var2, typ2) ->
+      unify'
+        (Abt.Typ.Var.Set.add bound_vars var1)
+        typ1
+        (Abt.Typ.subst Typ (Abt.Typ.var var1) var2 typ2)
+    | _ -> failwith "type error"
+  ;;
+
+  let unify typ1 typ2 = unify' Abt.Typ.Var.Set.empty typ1 typ2
+
+  let don't_generalize typ = Abt.Poly_typ.poly ([], typ)
+
+  let generalize context typ =
+    let free_vars_in_context =
+      Map.data context
+      |> List.map ~f:(fun poly_typ ->
+        let (Poly (bound_vars, typ)) = Abt.Poly_typ.out poly_typ in
+        free_vars ~bound_vars:(Abt.Typ.Var.Set.of_list bound_vars) typ)
+      |> Abt.Typ.Var.Set.union_list
+    in
+    let free_vars_in_typ = free_vars ~bound_vars:Abt.Typ.Var.Set.empty typ in
+    let vars_to_generalize =
+      Set.diff free_vars_in_typ free_vars_in_context
+      |> Set.to_list
+    in
+    Abt.Poly_typ.poly (vars_to_generalize, typ)
+  ;;
+
+  let rec infer_for_pat (pat : Abt.Pat.t)
+    : Abt.Typ.t Abt.Exp.Var.Map.t * Abt.Typ.t * Pat_constraint.Simple.t =
     match pat with
-    | Wild -> ([], Abt.Exp.Var.Map.empty, Abt.Typ.var (Abt.Typ.Var.create "uvar"))
+    | Wild -> (Abt.Exp.Var.Map.empty, Abt.Typ.var (Abt.Typ.Var.create "uvar"), True)
     | Var var ->
       let typ = Abt.Typ.var (Abt.Typ.Var.create "uvar") in
-      ([], Abt.Exp.Var.Map.singleton var (Abt.Poly_typ.poly ([], typ)), typ)
+      (Abt.Exp.Var.Map.singleton var typ, typ, True)
     | Record fields ->
-      let ((subst, context), fields) =
-        List.fold_map fields ~init:([], Abt.Exp.Var.Map.empty)
-          ~f:(fun (acc_subst, acc_context) (label, pat) ->
-            let (this_subst, this_context, typ) = infer_pat pat in
-            (* CR wduff: Order could matter, and I think this is the wrong order. *)
-            ((this_subst @ acc_subst,
-              Map.merge_skewed acc_context this_context ~combine:(fun ~key:_ _ _ -> assert false)),
-             (label, typ)))
+      let (context, fields_and_constrs) =
+        List.fold_map fields ~init:Abt.Exp.Var.Map.empty
+          ~f:(fun acc_context (label, pat) ->
+            let (this_context, typ, constr) = infer_for_pat pat in
+            (Map.merge_skewed acc_context this_context ~combine:(fun ~key:_ _ _ -> assert false),
+             ((label, typ), (label, constr))))
       in
-      (subst, context, Abt.Typ.prod fields)
-    | Inj (label, pat) -> ()
-    | Fold pat -> ()
+      let (fields, constrs) = List.unzip fields_and_constrs in
+      (context, Abt.Typ.prod fields, Record constrs)
+    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (pat_to_string pat) ()
     | Ascribe (pat, typ) ->
-      (* CR wduff: Check that [typ] is well-formed first. *)
-      let (subst1, context, typ') = infer_pat pat in
-      (* We don't need to substitute into typ, because it is from the source program and therefore
-         can't contain unification variables. *)
-      let subst2 = unify typ' typ in
-      (subst1 @ subst2, apply_subst_context subst2 context, typ)
+      check_typ typ;
+      match pat with
+      | Inj (label, pat) ->
+        (match Abt.Typ.out typ with
+         | Sum clauses ->
+           let (context, typ', constr) = infer_for_pat pat in
+           (match
+              List.find_map clauses ~f:(fun (label', typ'') ->
+                Option.some_if (String.equal label label') typ'')
+            with
+            | None -> failwith "type error"
+            | Some typ'' ->
+              let subst = unify typ' typ'' in
+              (apply_subst_mono_context subst context, typ, Inj (label, constr)))
+         | _ -> failwith "type error")
+      | Fold pat ->
+        (match Abt.Typ.out typ with
+         | Rec (typ_var, typ') ->
+           let (context, typ'', constr) = infer_for_pat pat  in
+           let subst = unify typ'' (Abt.Typ.subst Typ typ typ_var typ') in
+           (apply_subst_mono_context subst context, typ, Fold constr)
+         | _ -> failwith "type error")
+      | _ ->
+        let (context, typ', constr) = infer_for_pat pat in
+        (* We don't need to return the substitution, only apply it to the local context, because all
+           the variables being substituted for were generated by the above call to [infer_for_pat],
+           and therefore can't occur in the outer expression context. We also don't need to apply it
+           to [typ] before returning for essentially the same reason. *)
+        let subst = unify typ' typ in
+        (* CR wduff: Does the unification changing the type mean the constr needs to change?
+           (this would also apply to the Inj and Fold cases above) *)
+        (apply_subst_mono_context subst context, typ, constr)
+  ;;
 
-  let rec infer_exp context exp =
+  let check_pat_exhaustive pat_constr ~wrt =
+    match Pat_constraint.is_exhaustive pat_constr ~wrt with
+    | true -> ()
+    | false -> failwith "type error"
+  ;;
+
+  let rec infer_for_exp context exp =
     match Abt.Exp.out exp with
     | Let_type _ -> assert false
     | Var var ->
       let (Poly (_, typ)) = Abt.Poly_typ.out (Map.find_exn context var) in
       ([], typ)
     | Fun (arg_pat, body) ->
-      let (subst1, pat_context, arg_typ) = infer_pat arg_pat in
+      let (pat_context, arg_typ, pat_constr) = infer_for_pat arg_pat in
+      check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:arg_typ;
+      let pat_context = Map.map pat_context ~f:don't_generalize in
       let context =
-        Map.merge_skewed
-          (apply_subst_context subst1 context)
-          pat_context
-          ~combine:(fun ~key:_ _ _ -> assert false)
+        Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
       in
-      let (subst2, result_typ) = infer_exp context body in
-      (subst1 @ subst2, Abt.Typ.arrow (apply_subst subst2 arg_typ, result_typ))
+      let (subst, result_typ) = infer_for_exp context body in
+      (subst, Abt.Typ.arrow (apply_subst subst arg_typ, result_typ))
     | Ap (func, arg) ->
-      let (subst1, func_typ) = infer_exp context func in
-      let (subst2, arg_typ) = infer_exp (apply_subst_context subst1 context) arg in
+      let (subst1, func_typ) = infer_for_exp context func in
+      let (subst2, arg_typ) = infer_for_exp (apply_subst_context subst1 context) arg in
       let result_typ = Abt.Typ.var (Abt.Typ.Var.create "uvar") in
       let subst3 = unify (apply_subst subst2 func_typ) (Abt.Typ.arrow (arg_typ, result_typ)) in
       (subst1 @ subst2 @ subst3, apply_subst subst3 result_typ)
     | Record fields ->
       let (subst, fields) =
         List.fold_map fields ~init:[] ~f:(fun acc_subst (label, exp) ->
-          let (this_subst, typ) = infer_exp (apply_subst_context acc_subst context) exp in
-        (* CR wduff: Order could matter, and I think this is the wrong order. *)
-        (this_subst @ acc_subst, (label, typ)))
+          let (this_subst, typ) = infer_for_exp (apply_subst_context acc_subst context) exp in
+        (acc_subst @ this_subst, (label, typ)))
       in
       (subst, Abt.Typ.prod fields)
-    | Inj (label, exp) -> ()
-    | Fold exp -> ()
     | Match (exp, cases) ->
-      let (subst, typ) = infer_exp context exp in
+      let (subst, typ) = infer_for_exp context exp in
       let result_typ = Abt.Typ.var (Abt.Typ.Var.create "uvar") in
-      List.fold cases ~init:(subst, result_typ)
-        (* CR wduff: Need to keep changing context across the fold as well. *)
-        ~f:(fun (acc_subst, result_typ) (pat, exp) ->
-          let (subst1, pat_context, pat_typ) = infer_pat pat in
-          let subst2 = unify typ pat_typ in
-          let context =
-            Map.merge_skewed
-              (apply_subst_context (subst1 @ subst2) context)
-              (apply_subst_context subst2 pat_context)
-              ~combine:(fun ~key:_ _ _ -> assert false)
-          in
-          let (subst3, result_typ') = infer_exp context exp in
-          let subst4 = unify (apply_subst (subst1 @ subst2 @ subst3) result_typ) result_typ' in
-          (acc_subst @ subst1 @ subst2 @ subst3 @ subst4, apply_subst subst4 result_typ'))
+      let ((subst, _context, result_typ), pat_constrs) =
+        List.fold_map cases ~init:(subst, apply_subst_context subst context, result_typ)
+          ~f:(fun (acc_subst, context, result_typ) (pat, exp) ->
+            let (pat_context, pat_typ, pat_constr) = infer_for_pat pat in
+            let pat_context = Map.map pat_context ~f:don't_generalize in
+            let context =
+              Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
+            in
+            let subst1 = unify typ pat_typ in
+            let context = apply_subst_context subst1 context in
+            let (subst2, result_typ') = infer_for_exp context exp in
+            let subst3 = unify (apply_subst (subst1 @ subst2) result_typ) result_typ' in
+            ((acc_subst @ subst1 @ subst2 @ subst3,
+              apply_subst_context (subst2 @ subst3) context,
+              apply_subst subst3 result_typ'),
+             pat_constr))
+      in
+      (match Pat_constraint.or_list_check_irredundant pat_constrs ~wrt:typ with
+       | None -> failwith "redundant pattern"
+       | Some pat_constr ->
+         check_pat_exhaustive pat_constr ~wrt:typ;
+         (subst, result_typ))
     | Fix (var, body) ->
       let typ = Abt.Typ.var (Abt.Typ.Var.create "uvar") in
       let (subst1, typ') =
-        infer_exp (Map.set context ~key:var ~data:(Abt.Poly_typ.poly ([], typ))) body
+        infer_for_exp (Map.set context ~key:var ~data:(Abt.Poly_typ.poly ([], typ))) body
       in
       let subst2 = unify (apply_subst subst1 typ) typ' in
       (subst1 @ subst2, apply_subst subst2 typ')
     | Let ((pat, exp1), exp2) ->
-      let (subst1, typ1) = infer_exp context exp1 in
-      let (subst2, pat_context, pat_typ) = infer_pat pat in
-      let subst3 = unify (apply_subst subst2 typ1) pat_typ in
-      (* CR wduff: We need to generalize here, and consider the value restriction. *)
+      let (subst1, typ1) = infer_for_exp context exp1 in
+      let (pat_context, pat_typ, pat_constr) = infer_for_pat pat in
+      check_pat_exhaustive (Pat_constraint.singleton pat_constr) ~wrt:pat_typ;
+      let subst2 = unify typ1 pat_typ in
+      let context = apply_subst_context (subst1 @ subst2) context in
+      let pat_context = apply_subst_mono_context subst2 pat_context in
+      (* CR wduff: Consider the value restriction. *)
+      let pat_context = Map.map pat_context ~f:(generalize context) in
       let context =
-        Map.merge_skewed
-          (apply_subst_context (subst1 @ subst2) context)
-          pat_context
-          ~combine:(fun ~key:_ _ _ -> assert false)
+        Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
       in
-      let (subst4, typ2) = infer_exp (apply_subst_context subst3 context) exp2 in
-      (subst1 @ subst2 @ subst3 @ subst4, typ2)
+      let (subst3, typ2) = infer_for_exp context exp2 in
+      (subst1 @ subst2 @ subst3, typ2)
+    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (exp_to_string exp) ()
     | Ascribe (exp, typ) ->
-      (* CR wduff: Check that [typ] is well-formed first. *)
-      let (subst1, typ') = infer_exp context exp in
-      (* We don't need to substitute into typ, because it is from the source program and therefore
-         can't contain unification variables. *)
-      let subst2 = unify typ' typ in
-      (subst1 @ subst2, typ)
+      check_typ typ;
+      match Abt.Exp.out exp with
+      | Inj (label, exp) ->
+        (match Abt.Typ.out typ with
+         | Sum clauses ->
+           let (subst1, typ') = infer_for_exp context exp in
+           (match
+              List.find_map clauses ~f:(fun (label', typ'') ->
+                Option.some_if (String.equal label label') typ'')
+            with
+            | None -> failwith "type error"
+            | Some typ'' ->
+              let subst2 = unify typ' typ'' in
+              (subst1 @ subst2, typ))
+         | _ -> failwith "type error")
+      | Fold exp ->
+        (match Abt.Typ.out typ with
+         | Rec (typ_var, typ') ->
+           let (subst1, typ'') = infer_for_exp context exp in
+           let subst2 = unify typ'' (Abt.Typ.subst Typ typ typ_var typ') in
+           (subst1 @ subst2, typ)
+         | _ -> failwith "type error")
+      | _ ->
+        let (subst1, typ') = infer_for_exp context exp in
+        (* We don't need to substitute into typ, because it is from the source program and therefore
+           can't contain unification variables. *)
+        let subst2 = unify typ' typ in
+        (subst1 @ subst2, typ)
   ;;
 
   let run_exn exp =
     let exp = eval_type_aliases exp in
-    let (_, typ) = infer_exp Abt.Exp.Var.Map.empty exp in
+    let (_, typ) = infer_for_exp Abt.Exp.Var.Map.empty exp in
     typ
   ;;
 end
 
-let run ~filename () =
+let run ~filename ~type_checker () =
   let ast =
     In_channel.with_file filename ~f:(fun in_channel ->
       let lexbuf = Lexing.from_channel in_channel in
@@ -668,8 +993,21 @@ let run ~filename () =
   in
   let abt = Abt_of_ast.convert ast in
   printf "%s\n%!" (exp_to_string abt);
-  printf "%s\n%!" (typ_to_string (Bidirectional_type_checker.run_exn abt));
+  (match type_checker with
+   | `None -> ()
+   | `Bidirectional ->
+     printf "%s\n%!" (typ_to_string (Bidirectional_type_checker.run_exn abt))
+   | `Hindley_milner ->
+     printf "%s\n%!" (typ_to_string (Hindley_milner_type_checker.run_exn abt)));
   printf "%s\n%!" (exp_to_string (Dynamics.eval abt))
+;;
+
+let type_checker_arg_type =
+  Command.Arg_type.of_alist_exn
+    [ ("none", `None)
+    ; ("bidirectional", `Bidirectional)
+    ; ("hindley-milner", `Hindley_milner)
+    ]
 ;;
 
 let command =
@@ -677,6 +1015,9 @@ let command =
     ~summary:"Interprets fpcpat programs"
     (let%map_open.Command () = return ()
      and filename = anon ("FILE" %: Filename.arg_type)
+     and type_checker =
+       flag "type-checker" (required type_checker_arg_type)
+         ~doc:" which type checker to use (none|bidirectional|hindley-milner)"
      in
-     fun () -> run ~filename ())
+     fun () -> run ~filename ~type_checker ())
 ;;
