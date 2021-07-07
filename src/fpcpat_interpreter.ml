@@ -60,7 +60,6 @@ let rec pat_to_string' ~context (pat : Abt.Pat.t) =
     sprintf "(%s : %s)" (pat_to_string' ~context:`None pat) (typ_to_string' ~context:`None typ)
 ;;
 
-(* CR-soon wduff: Consider removing superfluous parens. *)
 let rec exp_to_string' ~context (exp : Abt.Exp.t) =
   match Abt.Exp.out exp with
   | Var var -> Abt.Exp.Var.name var
@@ -478,7 +477,7 @@ module Bidirectional_type_checker : sig
 end = struct
   (* This is good to have for completeness, but it doesn't actually have to do anything because we
      already check that types are well-formed in the ast->abt pass. Also this really is "check" not
-     "synth", because we need these types ot have kind "type", since they come from annotations. *)
+     "synth", because we need these types to have kind "type", since they come from annotations. *)
   let check_typ (_ : Abt.Typ.t) = ()
 
   (* CR-soon wduff: This subtyping relation is incomplete in a couple ways:
