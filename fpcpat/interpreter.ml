@@ -1,117 +1,5 @@
 open! Core
 
-module Ast = Parse_tree
-
-module Abt =
-  Abbot_other_examples.Fpcpat.Make (struct
-    type t = string [@@deriving sexp_of]
-  end)
-
-let add_parens_if bool string =
-  match bool with
-  | true -> "(" ^ string ^ ")"
-  | false -> string
-;;
-
-let rec typ_to_string' ~context (typ : Abt.Typ.t) =
-  match Abt.Typ.out typ with
-  | Var var -> Abt.Typ.Var.name var
-  | Arrow (typ1, typ2) ->
-    sprintf "(%s -> %s)"
-      (typ_to_string' ~context:`Lhs_of_arrow typ1)
-      (typ_to_string' ~context:`None typ2)
-    |> add_parens_if (match context with `None -> false | `Lhs_of_arrow -> true)
-  | Prod fields ->
-    typ_list_to_string fields
-    |> sprintf "prod[%s]"
-  | Sum clauses ->
-    typ_list_to_string clauses
-    |> sprintf "sum[%s]"
-  | Rec (var, typ) -> sprintf "rec[%s.%s]" (Abt.Typ.Var.name var) (typ_to_string' ~context:`None typ)
-
-and typ_list_to_string l =
-  List.map l ~f:(fun (label, typ) ->
-    sprintf "%s : %s" label (typ_to_string' ~context:`None typ))
-  |> String.concat ~sep:", "
-;;
-
-let record_to_string to_string fields =
-  match fields with
-  | [] -> "{}"
-  | _::_ ->
-    List.map fields ~f:(fun (label, x) ->
-      sprintf "%s = %s" label (to_string x))
-    |> String.concat ~sep:", "
-    |> sprintf "{ %s }"
-;;
-
-let rec pat_to_string' ~context (pat : Abt.Pat.t) =
-  match pat with
-  | Wild -> "_"
-  | Var var -> Abt.Exp.Var.name var
-  | Record fields -> record_to_string (pat_to_string' ~context:`None) fields
-  | Inj (label, pat) ->
-    sprintf "inj[%s] %s" label (pat_to_string' ~context:`Arg pat)
-    |> add_parens_if (match context with `None -> false | `Arg -> true)
-  | Fold pat ->
-    sprintf "fold %s" (pat_to_string' ~context:`Arg pat)
-    |> add_parens_if (match context with `None -> false | `Arg -> true)
-  | Ascribe (pat, typ) ->
-    sprintf "(%s : %s)" (pat_to_string' ~context:`None pat) (typ_to_string' ~context:`None typ)
-;;
-
-let rec exp_to_string' ~context (exp : Abt.Exp.t) =
-  match Abt.Exp.out exp with
-  | Var var -> Abt.Exp.Var.name var
-  | Fun (arg_pat, body) ->
-    sprintf "(fun %s => %s)"
-      (pat_to_string' ~context:`None arg_pat)
-      (exp_to_string' ~context:`None body)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Ap (func, arg) ->
-    sprintf "(%s %s)" (exp_to_string' ~context:`Fun func) (exp_to_string' ~context:`Arg arg)
-    |> add_parens_if (match context with `None | `Fun -> false | `Arg -> true )
-  | Record fields ->
-    record_to_string (exp_to_string' ~context:`None) fields
-  | Inj (label, exp) ->
-    sprintf "inj[%s] %s" label (exp_to_string' ~context:`Arg exp)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Fold exp ->
-    sprintf "fold %s" (exp_to_string' ~context:`Arg exp)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Match (exp, cases) ->
-    (match cases with
-     | [] -> sprintf "match %s with end" (exp_to_string' ~context:`None exp)
-     | _::_ ->
-       List.map cases ~f:(fun (pat, exp) ->
-         sprintf "%s => %s" (pat_to_string' ~context:`None pat) (exp_to_string' ~context:`None exp))
-       |> String.concat ~sep:" | "
-       |> sprintf "match %s with %s end" (exp_to_string' ~context:`None exp))
-  | Fix (var, body) ->
-    sprintf "fix %s is %s" (Abt.Exp.Var.name var) (exp_to_string' ~context:`None body)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Let ((pat, exp1), exp2) ->
-    sprintf
-      "let %s = %s in %s"
-      (pat_to_string' ~context:`None pat)
-      (exp_to_string' ~context:`None exp1)
-      (exp_to_string' ~context:`None exp2)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Let_type ((typ_var, typ), exp) ->
-    sprintf
-      "let type %s = %s in %s"
-      (Abt.Typ.Var.name typ_var)
-      (typ_to_string' ~context:`None typ)
-      (exp_to_string' ~context:`None exp)
-    |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
-  | Ascribe (exp, typ) ->
-    sprintf "(%s : %s)" (exp_to_string' ~context:`None exp) (typ_to_string' ~context:`None typ)
-;;
-
-let typ_to_string = typ_to_string' ~context:`None
-let pat_to_string = pat_to_string' ~context:`None
-let exp_to_string = exp_to_string' ~context:`None
-
 module Abt_of_ast : sig
   val convert : Ast.Exp.t -> Abt.Exp.t
 end = struct
@@ -269,7 +157,7 @@ module Dynamics = struct
          let arg_val = eval arg in
          let subst = Option.value_exn (try_pattern arg_pat arg_val) in
          eval (apply_subst subst body)
-       | _ -> raise_s [%message (exp_to_string exp : string)])
+       | _ -> raise_s [%message (Abt.exp_to_string exp : string)])
     | Record fields ->
       Abt.Exp.record (List.map fields ~f:(fun (label, exp) -> (label, eval exp)))
     | Inj (label, exp) -> Abt.Exp.inj (label, eval exp)
@@ -538,7 +426,7 @@ end = struct
       check_typ typ;
       let (context, constr) = check_pat pat typ in
       (context, typ, constr)
-    | Wild | Var _ | Fold _ -> failwithf "could not infer type of %s" (pat_to_string pat) ()
+    | Wild | Var _ | Fold _ -> failwithf "could not infer type of %s" (Abt.pat_to_string pat) ()
 
   and check_pat (pat : Abt.Pat.t) typ =
     match pat with
@@ -663,7 +551,7 @@ end = struct
       check_typ typ;
       check_exp context exp typ;
       typ
-    | Fold _ | Match _ | Fix _ -> failwithf "could not infer type of %s" (exp_to_string exp) ()
+    | Fold _ | Match _ | Fix _ -> failwithf "could not infer type of %s" (Abt.exp_to_string exp) ()
     | Let_type _ -> assert false
 
   and check_exp context exp typ =
@@ -864,7 +752,7 @@ end = struct
       in
       let (fields, constrs) = List.unzip fields_and_constrs in
       (context, Abt.Typ.prod fields, Record constrs)
-    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (pat_to_string pat) ()
+    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (Abt.pat_to_string pat) ()
     | Ascribe (pat, typ) ->
       check_typ typ;
       match pat with
@@ -978,7 +866,7 @@ end = struct
       in
       let (subst3, typ2) = infer_for_exp context exp2 in
       (subst1 @ subst2 @ subst3, typ2)
-    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (exp_to_string exp) ()
+    | Inj _ | Fold _ -> failwithf "could not infer type of %s" (Abt.exp_to_string exp) ()
     | Ascribe (exp, typ) ->
       check_typ typ;
       match Abt.Exp.out exp with
@@ -1025,14 +913,14 @@ let run ~filename ~type_checker () =
       Parser.program Lexer.token lexbuf)
   in
   let abt = Abt_of_ast.convert ast in
-  printf "%s\n%!" (exp_to_string abt);
+  printf "%s\n%!" (Abt.exp_to_string abt);
   (match type_checker with
    | `None -> ()
    | `Bidirectional ->
-     printf "%s\n%!" (typ_to_string (Bidirectional_type_checker.run_exn abt))
+     printf "%s\n%!" (Abt.typ_to_string (Bidirectional_type_checker.run_exn abt))
    | `Hindley_milner ->
-     printf "%s\n%!" (typ_to_string (Hindley_milner_type_checker.run_exn abt)));
-  printf "%s\n%!" (exp_to_string (Dynamics.eval abt))
+     printf "%s\n%!" (Abt.typ_to_string (Hindley_milner_type_checker.run_exn abt)));
+  printf "%s\n%!" (Abt.exp_to_string (Dynamics.eval abt))
 ;;
 
 let type_checker_arg_type =

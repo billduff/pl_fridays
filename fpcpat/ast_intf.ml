@@ -40,6 +40,6 @@ module Types = struct
   end
 end
 
-module type Parse_tree = sig
+module type Ast = sig
   include module type of struct include Types end
 end
