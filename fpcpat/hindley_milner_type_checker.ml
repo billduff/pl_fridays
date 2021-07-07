@@ -149,7 +149,8 @@ let rec infer_for_pat (pat : Pat.t)
 let check_pat_exhaustive pat_constr ~wrt =
   match Pat_constraint.is_exhaustive pat_constr ~wrt with
   | true -> ()
-  | false -> failwith "type error"
+  | false ->
+    raise_s [%message "non-exhaustive pattern match" (pat_constr : Pat_constraint.t) (wrt : Typ.t)]
 ;;
 
 let rec infer_for_exp context exp =

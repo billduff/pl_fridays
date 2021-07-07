@@ -39,7 +39,6 @@ let rec convert_pat typ_context
            let (this_context, pat) = convert_pat typ_context pat in
            let context =
              Map.merge_skewed acc_context this_context ~combine:(fun ~key:var_name _var1 _var2 ->
-               (* CR-soon wduff: Location info would be nice. *)
                raise_s [%message "Duplicate variable name in pattern." (var_name : string)])
            in
            (context, (label, pat)))

@@ -148,7 +148,7 @@ let check_pat_and_extend_context context pat typ =
 let check_pat_exhaustive pat_constr ~wrt =
   match Pat_constraint.is_exhaustive pat_constr ~wrt with
   | true -> ()
-  | false -> failwith "type error"
+  | false -> failwith "non-exhaustive pattern match"
 ;;
 
 let rec synth_exp context exp =

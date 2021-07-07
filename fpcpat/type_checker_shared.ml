@@ -33,6 +33,7 @@ module Pat_constraint = struct
       | Record of (string * t) list
       | Inj of string * t
       | Fold of t
+    [@@deriving sexp_of]
   end
 
   type t =
@@ -41,6 +42,7 @@ module Pat_constraint = struct
     | Or_records of t String.Map.t list
     | Or_injs of t String.Map.t
     | Fold of t
+  [@@deriving sexp_of]
 
   let rec cartesian_product = function
     | [] -> [[]]
@@ -85,11 +87,9 @@ module Pat_constraint = struct
     match t with
     | True -> True
     | Record fields ->
-      let map =
-        String.Map.of_alist_exn fields
-        |> Map.map ~f:singleton
-      in
-      Or_records [ map ]
+      List.map fields ~f:(fun (label, t) ->
+        String.Map.singleton label (singleton t))
+      |> Or_records
     | Inj (label, t) -> Or_injs (String.Map.singleton label (singleton t))
     | Fold t -> Fold (singleton t)
   ;;

@@ -16,7 +16,7 @@ let rec typ_to_string' ~context (typ : Typ.t) =
   match Typ.out typ with
   | Var var -> Typ.Var.name var
   | Arrow (typ1, typ2) ->
-    sprintf "(%s -> %s)"
+    sprintf "%s -> %s"
       (typ_to_string' ~context:`Lhs_of_arrow typ1)
       (typ_to_string' ~context:`None typ2)
     |> add_parens_if (match context with `None -> false | `Lhs_of_arrow -> true)
@@ -63,12 +63,12 @@ let rec exp_to_string' ~context (exp : Exp.t) =
   match Exp.out exp with
   | Var var -> Exp.Var.name var
   | Fun (arg_pat, body) ->
-    sprintf "(fun %s => %s)"
+    sprintf "fun %s => %s"
       (pat_to_string' ~context:`None arg_pat)
       (exp_to_string' ~context:`None body)
     |> add_parens_if (match context with `None -> false | `Fun | `Arg -> true )
   | Ap (func, arg) ->
-    sprintf "(%s %s)" (exp_to_string' ~context:`Fun func) (exp_to_string' ~context:`Arg arg)
+    sprintf "%s %s" (exp_to_string' ~context:`Fun func) (exp_to_string' ~context:`Arg arg)
     |> add_parens_if (match context with `None | `Fun -> false | `Arg -> true )
   | Record fields ->
     record_to_string (exp_to_string' ~context:`None) fields

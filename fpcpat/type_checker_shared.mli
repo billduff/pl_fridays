@@ -9,9 +9,10 @@ module Pat_constraint : sig
       | Record of (string * t) list
       | Inj of string * t
       | Fold of t
+    [@@deriving sexp_of]
   end
 
-  type t
+  type t [@@deriving sexp_of]
 
   val singleton : Simple.t -> t
   val or_list_check_irredundant : Simple.t list -> wrt:Abt.Typ.t -> t option

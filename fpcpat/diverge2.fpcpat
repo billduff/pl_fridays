@@ -1,0 +1,2 @@
+let loop = fix f is fun {} => f {} in
+loop {}
