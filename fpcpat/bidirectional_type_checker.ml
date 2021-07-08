@@ -16,8 +16,11 @@ let check_typ (_ : Typ.t) = ()
    I haven't done (1) because it's really grotty to implement, espcially if you try to implement
    it efficiently.
 
-   I haven't done (2) because  I'm dubious whether relying on type inhabitedness is a good idea,
-   since it is often undecidable (e.g. for system F). *)
+   I haven't done (2) because I'm dubious whether relying on type inhabitedness is a good idea,
+   since it is often undecidable (e.g. for system F).
+
+   A subtyping algorithm that solves both of these is given here:
+   https://www.cse.usf.edu/~ligatti/papers/subIsoTR.pdf *)
 let rec subtype typ typ' =
   match (Typ.out typ, Typ.out typ') with
   | (Var var, Var var') ->

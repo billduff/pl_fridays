@@ -1,0 +1,2 @@
+let id = fun x => x in
+{ l = id {}, r = id (inj[l] {} : sum[l : prod[], r : prod[]]) }

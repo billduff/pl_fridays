@@ -22,7 +22,7 @@ let rec eval_type_aliases exp =
     Exp.fix (var, eval_type_aliases body)
   | Let ((pat, exp1), exp2) ->
     Exp.let_ ((pat, eval_type_aliases exp1), eval_type_aliases exp2)
-  | Let_type ((typ_var, typ), exp) -> Exp.subst Typ typ typ_var exp
+  | Let_type ((typ_var, typ), exp) -> eval_type_aliases (Exp.subst Typ typ typ_var exp)
   | Ascribe (exp, typ) -> Exp.ascribe (eval_type_aliases exp, typ)
 ;;
 

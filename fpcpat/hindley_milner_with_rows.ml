@@ -1,11 +1,28 @@
+(*
 open! Core
 open Abt
 open Type_checker_shared
 
+let rec extend context typ =
+  match Typ.out typ with
+  | Var var -> Extended_typ.var (Map.find_exn context var)
+  | Arrow (typ1, typ2) -> Extended_typ.arrow (extend context typ1, extend context typ2)
+  | Prod fields -> Extended_typ.prod (row_of_list context fields)
+  | Sum clauses -> Extended_typ.sum (row_of_list context clauses)
+  | Rec (var, typ) ->
+    let var' = Extended_typ.Var.create (Typ.Var.name var) in
+    Extended_typ.rec_ (var', extend (Map.set context ~key:var ~data:var') typ)
+
+and row_of_list context l =
+  match l with
+  | [] -> Row.empty ()
+  | (label, typ) :: xs -> Row.cons ((label, extend context typ), row_of_list context xs)
+;;
+
 let check_typ (_ : Typ.t) = ()
 
 let apply_subst subst typ =
-  List.fold subst ~init:typ ~f:(fun acc (typ, var) -> Typ.subst Typ typ var acc)
+  List.fold subst ~init:typ ~f:(fun acc (typ, var) -> Extended_typ.subst Typ typ var acc)
 ;;
 
 let apply_subst_mono_context subst context =
@@ -14,16 +31,16 @@ let apply_subst_mono_context subst context =
 
 let apply_subst_context subst context =
   Map.map context ~f:(fun poly_typ ->
-    let (Poly (vars, typ)) = Poly_typ.out poly_typ in
-    Poly_typ.poly (vars, apply_subst subst typ))
+    let (Poly (vars, typ)) = Extended_poly_typ.out poly_typ in
+    Extended_poly_typ.poly (vars, apply_subst subst typ))
 ;;
 
 let rec free_vars ~bound_vars typ =
   match Typ.out typ with
   | Var var ->
     (match Set.mem bound_vars var with
-     | true -> Typ.Var.Set.empty
-     | false -> Typ.Var.Set.singleton var)
+     | true -> Typ.Var.Set.singleton var
+     | false -> Typ.Var.Set.empty)
   | Arrow (typ1, typ2) -> Set.union (free_vars ~bound_vars typ1) (free_vars ~bound_vars typ2)
   | Prod l | Sum l ->
     List.map l ~f:(fun (_label, typ) -> free_vars ~bound_vars typ)
@@ -37,14 +54,14 @@ let occurs ~in_ var =
 ;;
 
 let rec unify' bound_vars typ1 typ2 =
-  match (Typ.out typ1, Typ.out typ2) with
+  match (Extended_typ.out typ1, Extended_typ.out typ2) with
   | Var var, _ when not (Set.mem bound_vars var)->
     (match occurs ~in_:typ2 var with
-     | true -> failwith "infinite type"
+     | true -> failwith "type error"
      | false -> [ (typ2, var) ])
   | _, Var var when not (Set.mem bound_vars var) ->
     (match occurs ~in_:typ1 var with
-     | true -> failwith "infinite type"
+     | true -> failwith "type error"
      | false -> [ (typ1, var) ])
   | Var var1, Var var2 ->
     (* We know from the above these are both bound, so we can't substitute for them. *)
@@ -72,7 +89,7 @@ let rec unify' bound_vars typ1 typ2 =
       (Typ.Var.Set.add bound_vars var1)
       typ1
       (Typ.subst Typ (Typ.var var1) var2 typ2)
-  | _ -> failwithf "could not unify %s with %s" (typ_to_string typ1) (typ_to_string typ2) ()
+  | _ -> failwith "type error"
 ;;
 
 let unify typ1 typ2 = unify' Typ.Var.Set.empty typ1 typ2
@@ -177,7 +194,7 @@ let rec infer_for_exp context exp =
   match Exp.out exp with
   | Let_type _ -> assert false
   | Var var ->
-    let (Poly (_, typ)) = Poly_typ.out (Map.find_exn context var) in
+    let (Poly (_, typ)) = Extended_poly_typ.out (Map.find_exn context var) in
     ([], typ)
   | Fun (arg_pat, body) ->
     let (pat_context, arg_typ, pat_constr) = infer_for_pat arg_pat in
@@ -187,7 +204,7 @@ let rec infer_for_exp context exp =
       Map.merge_skewed context pat_context ~combine:(fun ~key:_ _ _ -> assert false)
     in
     let (subst, result_typ) = infer_for_exp context body in
-    (subst, Typ.arrow (apply_subst subst arg_typ, result_typ))
+    (subst, Extended_typ.arrow (apply_subst subst arg_typ, result_typ))
   | Ap (func, arg) ->
     let (subst1, func_typ) = infer_for_exp context func in
     let (subst2, arg_typ) = infer_for_exp (apply_subst_context subst1 context) arg in
@@ -283,9 +300,11 @@ let rec infer_for_exp context exp =
       let subst2 = unify typ' typ in
       (subst1 @ subst2, typ)
 ;;
+*)
 
-let typecheck_exn exp =
-  let exp = eval_type_aliases exp in
+let typecheck_exn _ =
+  failwith "unimpl"
+(* let exp = eval_type_aliases exp in
   let (_, typ) = infer_for_exp Exp.Var.Map.empty exp in
-  typ
+  typ *)
 ;;

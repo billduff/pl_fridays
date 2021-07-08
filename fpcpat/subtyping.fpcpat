@@ -1,0 +1,4 @@
+let type nat = rec[t.sum[l : prod[], r : t]] in
+let type zero_ish = rec[t.sum[l : prod[a : nat]]] in
+let (f : zero_ish -> nat) = fun x => x in
+f

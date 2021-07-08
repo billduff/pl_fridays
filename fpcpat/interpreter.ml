@@ -14,7 +14,9 @@ let run ~filename ~type_checker () =
    | `Bidirectional ->
      printf "%s\n%!" (Abt.typ_to_string (Bidirectional_type_checker.typecheck_exn abt))
    | `Hindley_milner ->
-     printf "%s\n%!" (Abt.typ_to_string (Hindley_milner_type_checker.typecheck_exn abt)));
+     printf "%s\n%!" (Abt.typ_to_string (Hindley_milner_type_checker.typecheck_exn abt))
+   | `Hindley_milner_with_rows ->
+     printf "%s\n%!" (Abt.typ_to_string (Hindley_milner_with_rows.typecheck_exn abt)));
   printf "%s\n%!" (Abt.exp_to_string (Dynamics.eval abt))
 ;;
 
@@ -23,6 +25,7 @@ let type_checker_arg_type =
     [ ("none", `None)
     ; ("bidirectional", `Bidirectional)
     ; ("hindley-milner", `Hindley_milner)
+    ; ("rows", `Hindley_milner_with_rows)
     ]
 ;;
 
